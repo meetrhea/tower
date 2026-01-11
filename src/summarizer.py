@@ -90,12 +90,13 @@ class Summarizer:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        # Parse JSON response
+        # Parse JSON response with robust extraction
         text = response.content[0].text
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
+        data = self._extract_json(text)
+
+        if data is None:
             # Fallback for malformed response
+            print(f"[Tower] Failed to parse LLM response: {text[:200]}")
             return Summary(
                 speech_text="Claude Code needs your attention but I couldn't parse the details.",
                 options=[
@@ -105,14 +106,22 @@ class Summarizer:
                 context_snippet=event.raw_output[-500:],
             )
 
-        options = [
-            SummaryOption(
-                key=opt["key"],
-                label=opt["label"],
-                instruction=opt["instruction"],
-            )
-            for opt in data.get("options", [])
-        ]
+        # Validate and build options
+        options = []
+        for opt in data.get("options", []):
+            key = str(opt.get("key", ""))
+            label = str(opt.get("label", ""))
+            instruction = str(opt.get("instruction", ""))
+
+            # Validate key is a single digit
+            if not key.isdigit() or len(key) != 1:
+                continue
+
+            # Skip if missing required fields
+            if not label or not instruction:
+                continue
+
+            options.append(SummaryOption(key=key, label=label, instruction=instruction))
 
         # Always add a "stop" option if not present
         if not any(opt.key == "9" for opt in options):
@@ -125,6 +134,41 @@ class Summarizer:
             options=options,
             context_snippet="\n".join(event.key_lines),
         )
+
+    def _extract_json(self, text: str) -> Optional[dict]:
+        """Extract JSON from LLM response, handling common formatting issues."""
+        # Try direct parse first
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Strip markdown code blocks
+        text = text.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+        # Try again after stripping
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Find first { and last } and try to extract
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        return None
 
 
 if __name__ == "__main__":

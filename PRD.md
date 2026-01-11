@@ -86,7 +86,10 @@
   - `speech_text`: 2-3 sentences, speakable, no jargon
   - `options`: array of { dtmf_key, label, claude_instruction }
   - `context_snippet`: key lines for logging
-- [ ] Use Claude API (claude-3-haiku for speed, upgrade later)
+- [ ] Use Claude Code Agent SDK (Python) for summarization:
+  - Sonnet for root cause analysis and complex reasoning
+  - Tool use for additional context (git status, recent commits, test history)
+  - Structured output for reliable JSON responses
 - [ ] Timeout: 10 seconds max
 
 ### Phone Integration (Twilio)
@@ -141,7 +144,7 @@
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
 | Daemon | Python 3.11 | Fast to write, good tmux/subprocess support |
-| LLM | Claude API (Haiku) | Speed, cost, familiarity |
+| LLM | Claude Code Agent SDK (Python) | Sonnet reasoning, tool use, structured output, consistent with Rhea patterns |
 | Telephony | Twilio Voice | Best docs, quick setup, DTMF + recording |
 | STT (v1.5) | Whisper (local or API) | Already have it running |
 | Logging | SQLite | Zero config, portable |

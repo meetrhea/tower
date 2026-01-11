@@ -127,7 +127,12 @@ Tower's value is in translation. Raw terminal output is noise. Good summaries ar
 - **Actionable** — Clear next steps, not generic "continue/stop"
 - **Confident** — Expert assistant, not hesitant helper
 
-See `src/summarizer.py` for the prompt engineering.
+**Implementation:** Tower uses the [Claude Code Agent SDK](https://github.com/anthropics/claude-code) (Python) for summarization. This gives us:
+- Sonnet-level reasoning for root cause analysis
+- Tool use for additional context (git status, recent commits, test history)
+- Consistent patterns with other Rhea infrastructure
+
+See `src/summarizer.py` for the implementation.
 
 ---
 

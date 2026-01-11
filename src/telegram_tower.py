@@ -34,17 +34,56 @@ sys.path.insert(0, os.path.dirname(__file__))
 from event_detector import TmuxMonitor, DetectedEvent, EventType, capture_tmux_pane
 from summarizer import Summarizer
 
-# Config
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TOTP_SECRET = os.getenv("TOTP_SECRET", pyotp.random_base32())
-TMUX_SESSIONS = json.loads(os.getenv("TMUX_SESSIONS", '[{"name": "main", "pane": "%0"}]'))
-AUTHORIZED_USER_ID = os.getenv("TELEGRAM_USER_ID", "")  # Your Telegram user ID
+# Config - loaded after dotenv in main()
+TELEGRAM_BOT_TOKEN = ""
+TOTP_SECRET = ""
+TMUX_SESSIONS = []
+AUTHORIZED_USER_ID = ""
 
 # Session state
 user_sessions = {}  # user_id -> session state
+failed_auth_attempts = {}  # user_id -> {"count": int, "lockout_until": float}
+last_permission_session = None  # Track which session last raised a permission event
+
+# Security constants
+MAX_AUTH_ATTEMPTS = 5
+LOCKOUT_SECONDS = 300  # 5 minutes
 
 # Bot application (set after init)
 bot_app = None
+
+
+def check_rate_limit(user_id: int) -> tuple[bool, str]:
+    """Check if user is rate-limited. Returns (is_allowed, message)."""
+    attempts = failed_auth_attempts.get(user_id, {"count": 0, "lockout_until": 0})
+
+    if time.time() < attempts.get("lockout_until", 0):
+        remaining = int(attempts["lockout_until"] - time.time())
+        return False, f"🔒 Locked out. Try again in {remaining}s."
+
+    return True, ""
+
+
+def record_failed_auth(user_id: int):
+    """Record a failed auth attempt and potentially lock out."""
+    attempts = failed_auth_attempts.get(user_id, {"count": 0, "lockout_until": 0})
+
+    # Reset if lockout expired
+    if time.time() >= attempts.get("lockout_until", 0):
+        attempts = {"count": 0, "lockout_until": 0}
+
+    attempts["count"] += 1
+
+    if attempts["count"] >= MAX_AUTH_ATTEMPTS:
+        attempts["lockout_until"] = time.time() + LOCKOUT_SECONDS
+        print(f"[Tower] User {user_id} locked out after {MAX_AUTH_ATTEMPTS} failed attempts")
+
+    failed_auth_attempts[user_id] = attempts
+
+
+def clear_failed_auth(user_id: int):
+    """Clear failed attempts after successful auth."""
+    failed_auth_attempts.pop(user_id, None)
 
 
 def verify_totp(code: str) -> bool:
@@ -238,6 +277,8 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /approve command."""
+    global last_permission_session
+
     user_id = update.effective_user.id
     session = user_sessions.get(user_id, {})
 
@@ -245,7 +286,17 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔐 Send your 6-digit code first.")
         return
 
-    # Find session waiting for input
+    # Use tracked permission session if available
+    if last_permission_session is not None:
+        session_num = last_permission_session
+        if 1 <= session_num <= len(TMUX_SESSIONS):
+            sess = TMUX_SESSIONS[session_num - 1]
+            result = send_to_session(session_num, "yes")
+            last_permission_session = None  # Clear after use
+            await update.message.reply_text(result, parse_mode="Markdown")
+            return
+
+    # Fallback: scan for waiting session
     for i, sess in enumerate(TMUX_SESSIONS, 1):
         output = capture_tmux_pane(sess["pane"], lines=10).lower()
         if any(x in output for x in ["waiting", "approve", "confirm", "y/n", "[y/n]"]):
@@ -285,7 +336,11 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages."""
     user_id = update.effective_user.id
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
+
+    # Guard against empty messages
+    if not text:
+        return
 
     if not is_authorized(user_id):
         await update.message.reply_text("🚫 Unauthorized.")
@@ -295,9 +350,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check if authenticated
     if not session.get("authenticated"):
+        # Check rate limit first
+        allowed, msg = check_rate_limit(user_id)
+        if not allowed:
+            await update.message.reply_text(msg)
+            return
+
         # Check if this is a TOTP code
         if text.isdigit() and len(text) == 6:
             if verify_totp(text):
+                clear_failed_auth(user_id)
                 user_sessions[user_id] = {"authenticated": True, "auth_time": time.time()}
                 status = get_session_status_text()
                 await update.message.reply_text(
@@ -305,7 +367,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown"
                 )
             else:
-                await update.message.reply_text("❌ Invalid code. Try again.")
+                record_failed_auth(user_id)
+                attempts = failed_auth_attempts.get(user_id, {})
+                remaining = MAX_AUTH_ATTEMPTS - attempts.get("count", 0)
+                await update.message.reply_text(f"❌ Invalid code. {remaining} attempts remaining.")
         else:
             await update.message.reply_text("🔐 Send your 6-digit code to authenticate.")
         return
@@ -326,6 +391,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Quick approve
     if text_lower in ["approve", "yes", "y", "ok", "go"]:
+        global last_permission_session
+
+        # Use tracked permission session if available
+        if last_permission_session is not None:
+            session_num = last_permission_session
+            if 1 <= session_num <= len(TMUX_SESSIONS):
+                result = send_to_session(session_num, "yes")
+                last_permission_session = None
+                await update.message.reply_text(result, parse_mode="Markdown")
+                return
+
+        # Fallback: scan for waiting session
         for i, sess in enumerate(TMUX_SESSIONS, 1):
             output = capture_tmux_pane(sess["pane"], lines=10).lower()
             if any(x in output for x in ["waiting", "approve", "confirm", "y/n"]):
@@ -397,14 +474,21 @@ class TelegramAlerter:
         self.summarizer = Summarizer()
         self.running = False
         self.loop = None
+        self.session_name_to_num = {}  # Map session names to numbers
 
-    def on_event(self, session_name: str, event: DetectedEvent):
+    def on_event(self, session_name: str, session_num: int, event: DetectedEvent):
         """Handle detected event - send Telegram alert."""
+        global last_permission_session
+
+        # Track permission events for targeted approval
+        if event.event_type == EventType.PERMISSION:
+            last_permission_session = session_num
+
         summary = self.summarizer.summarize(event)
 
         emoji = "🔴" if event.event_type == EventType.ERROR else "🟡"
 
-        message = f"{emoji} *Tower Alert: {session_name}*\n\n"
+        message = f"{emoji} *Tower Alert: {session_name}* (session {session_num})\n\n"
         message += f"{summary.speech_text}\n\n"
         message += "*Options:*\n"
 
@@ -414,7 +498,7 @@ class TelegramAlerter:
         message += "\n_Or send a custom instruction._"
 
         # Schedule the async send in the event loop
-        if self.loop:
+        if self.loop and bot_app:
             asyncio.run_coroutine_threadsafe(
                 send_alert(self.user_id, message),
                 self.loop
@@ -425,42 +509,37 @@ class TelegramAlerter:
         self.running = True
         self.loop = loop
 
-        for session in TMUX_SESSIONS:
+        for i, session in enumerate(TMUX_SESSIONS, 1):
             monitor = TmuxMonitor(session["pane"])
 
-            def make_callback(name):
-                return lambda event: self.on_event(name, event)
+            def make_callback(name, num):
+                return lambda event: self.on_event(name, num, event)
 
             thread = threading.Thread(
                 target=monitor.run,
-                args=(make_callback(session["name"]),),
+                args=(make_callback(session["name"], i),),
                 daemon=True
             )
             thread.start()
             print(f"[Tower] Monitoring {session['name']} ({session['pane']})")
 
 
-def print_setup_info():
+def print_setup_info(show_secret: bool = False):
     """Print setup instructions."""
-    totp = pyotp.TOTP(TOTP_SECRET)
-
     print("\n" + "=" * 60)
     print("🗼 TOWER - Telegram Edition")
     print("=" * 60)
 
-    print("\n📱 TOTP Setup:")
-    print(f"   Secret: {TOTP_SECRET}")
-    print(f"   Current code: {totp.now()}")
+    if show_secret:
+        totp = pyotp.TOTP(TOTP_SECRET)
+        print("\n📱 TOTP Setup:")
+        print(f"   Secret: {TOTP_SECRET}")
+        print(f"   Current code: {totp.now()}")
+    else:
+        print("\n📱 TOTP: Configured (run with --setup to see secret)")
 
-    print("\n🤖 Telegram Bot Setup:")
-    print("   1. Message @BotFather on Telegram")
-    print("   2. Send /newbot")
-    print("   3. Name your bot (e.g., 'My Tower Bot')")
-    print("   4. Copy the token to TELEGRAM_BOT_TOKEN in .env")
-
-    print("\n🔒 Security (Optional):")
-    print("   Set TELEGRAM_USER_ID to restrict to your account only")
-    print("   (Message @userinfobot to get your ID)")
+    print(f"\n🔒 Security:")
+    print(f"   Authorized user: {AUTHORIZED_USER_ID}")
 
     print("\n🖥️  Sessions:")
     for s in TMUX_SESSIONS:
@@ -476,19 +555,33 @@ def main():
     from dotenv import load_dotenv
     load_dotenv()
 
-    # Reload config after dotenv
+    # Check for --setup flag
+    show_setup = "--setup" in sys.argv
+
+    # Load config after dotenv
     global TELEGRAM_BOT_TOKEN, TOTP_SECRET, TMUX_SESSIONS, AUTHORIZED_USER_ID
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TOTP_SECRET = os.getenv("TOTP_SECRET", pyotp.random_base32())
+    TOTP_SECRET = os.getenv("TOTP_SECRET", "")
     TMUX_SESSIONS = json.loads(os.getenv("TMUX_SESSIONS", '[{"name": "main", "pane": "%0"}]'))
     AUTHORIZED_USER_ID = os.getenv("TELEGRAM_USER_ID", "")
 
-    print_setup_info()
-
+    # Security: require critical config
+    missing = []
     if not TELEGRAM_BOT_TOKEN:
-        print("\n❌ TELEGRAM_BOT_TOKEN not set in .env")
-        print("   Get one from @BotFather on Telegram")
+        missing.append("TELEGRAM_BOT_TOKEN - get one from @BotFather on Telegram")
+    if not TOTP_SECRET:
+        missing.append("TOTP_SECRET - generate with: python -c \"import pyotp; print(pyotp.random_base32())\"")
+    if not AUTHORIZED_USER_ID:
+        missing.append("TELEGRAM_USER_ID - get yours from @userinfobot on Telegram")
+
+    if missing:
+        print("\n❌ Missing required configuration in .env:\n")
+        for m in missing:
+            print(f"   • {m}")
+        print("\nTower requires explicit security configuration to run.")
         return
+
+    print_setup_info(show_secret=show_setup)
 
     # Build application
     bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
