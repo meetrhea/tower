@@ -20,7 +20,13 @@ Tower has to be impressive to see adoption. Every alert should make you think "t
 
 ## Quick Start (Telegram - Free, 2 minutes)
 
+> **Full setup guide with troubleshooting: [SETUP.md](SETUP.md)**
+
 ```bash
+git clone https://github.com/meetrhea/tower.git
+cd tower
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
