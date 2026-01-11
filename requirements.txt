@@ -1,5 +1,7 @@
 anthropic>=0.18.0
 twilio>=8.10.0
 python-dotenv>=1.0.0
-pyttsx3>=2.90
 flask>=3.0.0
+pyotp>=2.9.0
+pyttsx3>=2.90
+openai-whisper>=20231117  # For voice message transcription later
