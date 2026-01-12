@@ -143,20 +143,52 @@ Respond with JSON only:
 
 
 class Summarizer:
-    """Converts events into speakable summaries with options."""
+    """Converts events into speakable summaries with options.
+
+    Uses Claude Agent SDK with your existing Claude Code login - no API key needed.
+    Falls back to basic Anthropic client only if SDK unavailable AND API key provided.
+    """
 
     def __init__(self):
-        self.use_agent_sdk = AGENT_SDK_AVAILABLE and os.getenv("USE_AGENT_SDK", "true").lower() == "true"
+        self.use_agent_sdk = AGENT_SDK_AVAILABLE
+        self.client = None
 
         if not self.use_agent_sdk:
-            self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            # Fallback only if SDK not available - requires API key
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if api_key:
+                self.client = Anthropic(api_key=api_key)
+            else:
+                print("[Tower] Warning: Agent SDK not available and no ANTHROPIC_API_KEY set")
+                print("[Tower] Install claude-agent-sdk or set ANTHROPIC_API_KEY for summaries")
 
     def summarize(self, event: DetectedEvent) -> Summary:
         """Generate a spoken summary and options for an event."""
         if self.use_agent_sdk:
             return asyncio.run(self._summarize_with_agent_sdk(event))
-        else:
+        elif self.client:
             return self._summarize_with_anthropic(event)
+        else:
+            # No LLM available - return basic summary from event data
+            return self._basic_summary(event)
+
+    def _basic_summary(self, event: DetectedEvent) -> Summary:
+        """Fallback summary when no LLM is available."""
+        type_messages = {
+            EventType.ERROR: "Error detected in Claude Code session.",
+            EventType.PERMISSION: "Claude Code is waiting for permission.",
+            EventType.STUCK: "Claude Code session appears stuck.",
+            EventType.NORMAL: "Claude Code session update.",
+        }
+        return Summary(
+            speech_text=type_messages.get(event.event_type, "Claude Code needs attention."),
+            options=[
+                SummaryOption("1", "approve", "yes"),
+                SummaryOption("2", "retry", "retry"),
+                SummaryOption("9", "stop", "Stop and wait for me"),
+            ],
+            context_snippet="\n".join(event.key_lines),
+        )
 
     async def _summarize_with_agent_sdk(self, event: DetectedEvent) -> Summary:
         """Use Claude Agent SDK with tools for better summaries."""
