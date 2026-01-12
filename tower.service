@@ -1,0 +1,28 @@
+[Unit]
+Description=Tower - Air Traffic Control for AI Agents
+Documentation=https://github.com/meetrhea/tower
+After=network.target
+
+[Service]
+Type=simple
+# UPDATE: Set your username here
+User=dshanklin
+# UPDATE: Set your tower directory here
+WorkingDirectory=/home/dshanklin/repos-meetrhea/tower
+Environment=PATH=/home/dshanklin/repos-meetrhea/tower/venv/bin:/usr/bin:/bin
+EnvironmentFile=/home/dshanklin/repos-meetrhea/tower/.env
+ExecStart=/home/dshanklin/repos-meetrhea/tower/venv/bin/python src/telegram_tower.py
+Restart=on-failure
+RestartSec=10
+
+# Logging to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tower
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

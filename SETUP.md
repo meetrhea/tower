@@ -137,36 +137,29 @@ You should see:
 
 ## Running as a Service (Production)
 
-### Option A: systemd
+**Important:** Tower must run locally on the same machine as your Claude Code tmux sessions. It cannot run in Docker/Coolify because it needs direct access to tmux.
+
+### Option A: systemd (Recommended)
+
+A service file is included in the repo:
 
 ```bash
-sudo nano /etc/systemd/system/tower.service
-```
+# Edit the service file to match your paths (already configured for dshanklin)
+nano tower.service
 
-```ini
-[Unit]
-Description=Tower - AI Agent Control
-After=network.target
+# Copy to systemd
+sudo cp tower.service /etc/systemd/system/
 
-[Service]
-Type=simple
-User=youruser
-WorkingDirectory=/path/to/tower
-Environment=PATH=/path/to/tower/venv/bin
-EnvironmentFile=/path/to/tower/.env
-ExecStart=/path/to/tower/venv/bin/python src/telegram_tower.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
+# Enable and start
 sudo systemctl daemon-reload
 sudo systemctl enable tower
 sudo systemctl start tower
+
+# Check status
 sudo systemctl status tower
+
+# View logs
+journalctl -u tower -f
 ```
 
 ### Option B: tmux (simple)
