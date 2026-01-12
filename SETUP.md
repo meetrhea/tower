@@ -212,6 +212,65 @@ tmux list-panes -a         # List all panes across sessions
 
 ---
 
+## Step 8: Configure Claude Code Hooks (Optional but Recommended)
+
+Hooks provide **instant notifications** instead of waiting for tmux polling (2 second delay).
+
+### Add Tower hooks to Claude Code
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/YOUR_USERNAME/repos-meetrhea/tower/hooks/tower-hook.sh"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/YOUR_USERNAME/repos-meetrhea/tower/hooks/tower-hook.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Replace `YOUR_USERNAME` with your actual username.
+
+### Test the hook
+
+```bash
+# Start Tower in one terminal
+python src/telegram_tower.py
+
+# In another terminal, send a test event
+echo '{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' | nc -U /tmp/tower.sock
+```
+
+You should see an instant Telegram notification with the ⚡ emoji.
+
+### How it works
+
+- **Without hooks**: Tower polls tmux every 2 seconds, then sends notification
+- **With hooks**: Claude Code calls the hook script instantly on permission prompts
+
+Both methods work together - hooks for instant permission detection, tmux polling for errors and STUCK detection.
+
+---
+
 ## Next Steps
 
 - **Voice messages**: Coming soon - send voice notes, Tower transcribes

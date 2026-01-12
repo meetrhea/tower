@@ -31,7 +31,13 @@ import pyotp
 # Import our modules
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
-from event_detector import TmuxMonitor, DetectedEvent, EventType, capture_tmux_pane
+from event_detector import (
+    TmuxMonitor,
+    HooksListener,
+    DetectedEvent,
+    EventType,
+    capture_tmux_pane,
+)
 from summarizer import Summarizer
 
 # Config - loaded after dotenv in main()
@@ -467,7 +473,12 @@ async def send_alert(user_id: int, message: str):
 
 
 class TelegramAlerter:
-    """Monitors sessions and sends Telegram alerts on events."""
+    """Monitors sessions and sends Telegram alerts on events.
+
+    Uses two detection mechanisms:
+    1. HooksListener (instant) - Claude Code calls our hook on permission prompts
+    2. TmuxMonitor (fallback) - Polls tmux for errors, STUCK state, sessions without hooks
+    """
 
     def __init__(self, user_id: int):
         self.user_id = user_id
@@ -475,6 +486,7 @@ class TelegramAlerter:
         self.running = False
         self.loop = None
         self.session_name_to_num = {}  # Map session names to numbers
+        self.hooks_listener = None
 
     def on_event(self, session_name: str, session_num: int, event: DetectedEvent):
         """Handle detected event - send Telegram alert."""
@@ -486,7 +498,13 @@ class TelegramAlerter:
 
         summary = self.summarizer.summarize(event)
 
-        emoji = "🔴" if event.event_type == EventType.ERROR else "🟡"
+        # Choose emoji based on event type
+        emoji_map = {
+            EventType.ERROR: "🔴",
+            EventType.PERMISSION: "🟡",
+            EventType.STUCK: "⏸️",
+        }
+        emoji = emoji_map.get(event.event_type, "🟡")
 
         message = f"{emoji} *Tower Alert: {session_name}* (session {session_num})\n\n"
         message += f"{summary.speech_text}\n\n"
@@ -504,11 +522,62 @@ class TelegramAlerter:
                 self.loop
             )
 
+    def on_hook_event(self, event: DetectedEvent):
+        """Handle event from Claude Code hooks - instant notification."""
+        global last_permission_session
+
+        # For hook events, we use session 1 by default (hooks don't tell us which session)
+        # In future: could parse session from hook data or use session_id
+        session_num = 1
+        session_name = TMUX_SESSIONS[0]["name"] if TMUX_SESSIONS else "unknown"
+
+        # Track permission events for targeted approval
+        if event.event_type == EventType.PERMISSION:
+            last_permission_session = session_num
+
+        summary = self.summarizer.summarize(event)
+
+        message = f"⚡ *Instant Alert: {session_name}*\n\n"
+        message += f"{summary.speech_text}\n\n"
+        message += "*Options:*\n"
+
+        for opt in summary.options[:3]:
+            message += f"• Reply `{opt.key}` — {opt.label}\n"
+
+        message += "\n_Via Claude Code hooks - instant notification!_"
+
+        # Schedule the async send in the event loop
+        if self.loop and bot_app:
+            asyncio.run_coroutine_threadsafe(
+                send_alert(self.user_id, message),
+                self.loop
+            )
+
     def start(self, loop):
-        """Start monitoring all sessions."""
+        """Start monitoring all sessions with hooks + tmux fallback."""
         self.running = True
         self.loop = loop
 
+        # Start hooks listener for instant permission detection
+        self.hooks_listener = HooksListener(callback=self.on_hook_event)
+
+        def run_hooks_listener():
+            """Run the async hooks listener in a new event loop."""
+            hooks_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(hooks_loop)
+            try:
+                hooks_loop.run_until_complete(self.hooks_listener.start())
+            except Exception as e:
+                print(f"[Tower] Hooks listener error: {e}")
+
+        hooks_thread = threading.Thread(
+            target=run_hooks_listener,
+            daemon=True
+        )
+        hooks_thread.start()
+        print("[Tower] Hooks listener started (instant permission detection)")
+
+        # Start tmux monitors for error/STUCK detection (fallback)
         for i, session in enumerate(TMUX_SESSIONS, 1):
             monitor = TmuxMonitor(session["pane"])
 
@@ -521,7 +590,7 @@ class TelegramAlerter:
                 daemon=True
             )
             thread.start()
-            print(f"[Tower] Monitoring {session['name']} ({session['pane']})")
+            print(f"[Tower] Monitoring {session['name']} ({session['pane']}) via tmux")
 
 
 def print_setup_info(show_secret: bool = False):
@@ -599,13 +668,22 @@ def main():
     bot_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     # Start alerter if user ID configured
+    alerter = None
     if AUTHORIZED_USER_ID:
         alerter = TelegramAlerter(int(AUTHORIZED_USER_ID))
-        # We'll start it after the bot starts
         print(f"\n[Tower] Alerts will go to user ID: {AUTHORIZED_USER_ID}")
 
     print("\n[Tower] Bot is running. Message your bot on Telegram!")
     print("[Tower] Press Ctrl+C to stop.\n")
+
+    # Start the alerter after the event loop is running
+    async def post_init(app):
+        """Called after bot starts - start the alerter monitoring."""
+        if alerter:
+            loop = asyncio.get_event_loop()
+            alerter.start(loop)
+
+    bot_app.post_init = post_init
 
     # Run the bot
     bot_app.run_polling(allowed_updates=Update.ALL_TYPES)
