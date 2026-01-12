@@ -1,6 +1,8 @@
 anthropic>=0.18.0
+claude-agent-sdk>=0.0.23
 python-dotenv>=1.0.0
 pyotp>=2.9.0
+anyio>=4.0.0
 
 # Telegram (recommended - free, easy)
 python-telegram-bot>=21.0
